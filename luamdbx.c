@@ -7,7 +7,7 @@
 #define LUA_MDBX_TYPENAME "MDBX_env"
 
 static int
-mdbx_open(lua_State *L) {
+lua_mdbx_open(lua_State *L) {
     MDBX_env **env;
     const char *path;
     unsigned int flags = MDBX_NOSUBDIR;
@@ -56,7 +56,121 @@ mdbx_open(lua_State *L) {
 }
 
 static int
-mdbx_set(lua_State *L) {
+lua_mdbx_mget(lua_State *L) {
+    int nsubkeys, nargs, i, rc;
+    MDBX_env **env;
+    MDBX_txn *txn;
+    MDBX_dbi dbi;
+
+    nargs = lua_gettop(L);
+    if (nargs != 2) {
+        return luaL_error(L, "expecting 2 arguments, "
+            "but only seen %d", nargs);
+    }
+
+    env = luaL_checkudata(L, 1, LUA_MDBX_TYPENAME);
+    if (!lua_istable(L, 2)) {
+        return luaL_error(L, "expecting table on second argument");
+    }
+
+    nsubkeys = lua_objlen(L, 2);
+    if (nsubkeys == 0) {
+        return luaL_error(L, "at least one key on second argument");
+    }
+
+    MDBX_val keys[nsubkeys];
+    for (i = 0; i < nsubkeys; i++) {
+        lua_rawgeti(L, 2, i + 1);
+        keys[i].iov_base = (unsigned char *)luaL_checklstring(L, -1, &keys[i].iov_len);
+    }
+
+    rc = mdbx_txn_begin(*env, NULL, 0, &txn);
+    if (rc != MDBX_SUCCESS) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "fail to begin txn: %s", mdbx_strerror(rc));
+        return 2;
+    }
+
+    rc = mdbx_dbi_open(txn, NULL, 0, &dbi);
+    if (rc != MDBX_SUCCESS) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "fail to open dbi: %s", mdbx_strerror(rc));
+        return 2;
+    }
+
+    lua_createtable(L, 0, nsubkeys);
+    for (i = 0; i < nsubkeys; i++) {
+        MDBX_val v;
+        double num;
+        unsigned int c;
+
+        if (keys[i].iov_len == 0 || keys[i].iov_len > 255) {
+            continue;
+        }
+
+        rc = mdbx_get(txn, dbi, &keys[i], &v);
+        if (rc != MDBX_SUCCESS) {
+            continue;
+        }
+
+        switch (((char *)v.iov_base)[0]) {
+        case 's':
+            lua_pushlstring(L, ((char *)v.iov_base) + 1, v.iov_len - 2);
+            break;
+
+        case 'n':
+            num = atof((char *)v.iov_base + 1);
+            lua_pushnumber(L, num);
+            break;
+
+        case 'b':
+            c = ((unsigned char*)v.iov_base)[1];
+            lua_pushboolean(L, c == 49 ? 1 : 0);
+            break;
+
+        default:
+            lua_pushnil(L);
+        }
+
+        lua_setfield(L, -2, keys[i].iov_base);
+    }
+
+    mdbx_dbi_close(*env, dbi);
+    mdbx_txn_abort(txn);
+    txn = NULL;
+
+    return 1;
+}
+
+static int
+lua_mdbx_get(lua_State *L) {
+    int nresult;
+
+    lua_createtable(L, 1, 0);
+    lua_insert(L, 2);
+    lua_rawseti(L, 2, 1);
+    nresult = lua_mdbx_mget(L);
+
+    if (nresult != 1) {
+        return nresult;
+    }
+
+    if (!lua_istable(L, -1)) {
+        lua_pushnil(L);
+        lua_pushliteral(L, "invalid result from mget");
+        return 2;
+    }
+
+    lua_pushnil(L);
+    if (lua_next(L, -2) == 0) {
+        lua_pushnil(L);
+    }
+
+    return 1;
+}
+
+static int
+lua_mdbx_set(lua_State *L) {
     MDBX_env **env;
     MDBX_txn *txn;
     MDBX_dbi dbi;
@@ -188,7 +302,7 @@ mdbx_set(lua_State *L) {
 }
 
 static int
-mdbx_close(lua_State *L) {
+lua_mdbx_close(lua_State *L) {
     MDBX_env **env;
 
     env = luaL_checkudata(L, 1, LUA_MDBX_TYPENAME);
@@ -206,12 +320,14 @@ mdbx_close(lua_State *L) {
 int
 luaopen_mdbx(lua_State *L) {
     static const struct luaL_Reg methods[] = {
-        { "open", mdbx_open },
+        { "open", lua_mdbx_open },
         { NULL, NULL },
     };
 
     static const struct luaL_Reg mdbx_methods[] = {
-        { "set", mdbx_set },
+        { "get", lua_mdbx_get },
+        { "mget", lua_mdbx_mget },
+        { "set", lua_mdbx_set },
         { NULL, NULL }
     };
 
@@ -221,17 +337,17 @@ luaopen_mdbx(lua_State *L) {
     if (luaL_newmetatable(L, LUA_MDBX_TYPENAME)) {
         luaL_register(L, NULL, mdbx_methods);
 
-	lua_pushliteral(L, "__gc");
-	lua_pushcfunction(L, mdbx_close);
-	lua_settable(L, -3);
+        lua_pushliteral(L, "__gc");
+        lua_pushcfunction(L, lua_mdbx_close);
+        lua_settable(L, -3);
 
-	lua_pushliteral(L, "__index");
-	lua_pushvalue(L, -2);
-	lua_settable(L, -3);
+        lua_pushliteral(L, "__index");
+        lua_pushvalue(L, -2);
+        lua_settable(L, -3);
 
-	lua_pushliteral(L, "__metatable");
-	lua_pushliteral(L, "must not access this metatable");
-	lua_settable(L, -3);
+        lua_pushliteral(L, "__metatable");
+        lua_pushliteral(L, "must not access this metatable");
+        lua_settable(L, -3);
     }
 
     lua_pop(L, 1);
