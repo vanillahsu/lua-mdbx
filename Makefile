@@ -1,4 +1,4 @@
-CFLAGS += -fPIC -I/usr/local/include/luajit-2.1 -I/usr/local/include
+CFLAGS += -fPIC -I/usr/local/include/lua53 -I/usr/local/include -g
 LFLAGS += -shared -L/usr/local/lib -pthread
 LIBS   += -lmdbx 
 

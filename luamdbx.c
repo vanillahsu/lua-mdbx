@@ -39,7 +39,7 @@ lua_mdbx_env_init(lua_State *L) {
 
 	maxdbs = lua_tonumber(L, 4);
 	if (maxdbs == 0) {
-		maxdbs = 1;
+		maxdbs = 120;
 	}
 
 	rc = mdbx_env_create(&env);
@@ -344,7 +344,7 @@ static int
 lua_mdbx_txn_open_dbi(lua_State *L) {
 	MDBX_txn *txn = lua_mdbx_txn_fetch(L, 1);
 	MDBX_dbi dbi, *pdbi;
-	int flags = MDBX_TXN_READWRITE, rc;
+	int flags = MDBX_DB_DEFAULTS, rc;
 
 	if (lua_gettop(L) >= 2) {
 		flags = lua_tonumber(L, 2);
@@ -414,6 +414,149 @@ lua_mdbx_dbi_close(lua_State *L) {
 	return (1);
 }
 
+static int
+lua_mdbx_dbi_delete(lua_State *L) {
+	MDBX_dbi dbi = lua_mdbx_dbi_fetch(L, 1);
+	MDBX_txn *txn = lua_mdbx_txn_fetch(L, 2);
+	MDBX_val k;
+	int rc;
+
+	k.iov_base = (char *)luaL_checklstring(L, 3, &k.iov_len);
+	if (k.iov_len == 0) {
+		lua_pushboolean(L, 0);
+		lua_pushliteral(L, "empty key");
+		return (1);
+	}
+
+	rc = mdbx_del(txn, dbi, &k, NULL);
+	if (rc != MDBX_SUCCESS) {
+		lua_pushboolean(L, 0);
+		lua_pushfstring(L, "fail to delete key(%s): %s", k.iov_base, mdbx_strerror(rc));
+		return (1);
+	}
+
+	lua_pushboolean(L, 1);
+
+	return (1);
+}
+
+static int
+lua_mdbx_dbi_put(lua_State *L) {
+	MDBX_dbi dbi = lua_mdbx_dbi_fetch(L, 1);
+	MDBX_txn *txn = lua_mdbx_txn_fetch(L, 2);
+	MDBX_val k, v;
+	int rc, type, siz;
+	size_t value_size, output_size;
+	double num;
+	unsigned char c, *value;
+	char *output, dummy[1];
+
+	k.iov_base = (char *)luaL_checklstring(L, 3, &k.iov_len);
+	if (k.iov_len == 0) {
+		lua_pushboolean(L, 0);
+		lua_pushliteral(L, "empty key");
+		return (1);
+	}
+
+	if (k.iov_len > 255) {
+		lua_pushboolean(L, 0);
+		lua_pushliteral(L, "key too long");
+		return (1);
+	}
+
+	type = lua_type(L, 4);
+	switch(type) {
+	case LUA_TSTRING:
+		value = (unsigned char *)luaL_checklstring(L, 4, &value_size);
+		output_size = value_size + 1;
+		output = malloc(output_size);
+		memset(output, 0, output_size);
+		snprintf(output, output_size, "s%s", value);
+		v.iov_base = output;
+		v.iov_len = output_size;
+		break;
+	case LUA_TNUMBER:
+		num = luaL_checknumber(L, 4);
+		siz = snprintf(dummy, sizeof(dummy), "%f", num);
+		output = malloc(siz + 1);
+		memset(output, 0, siz + 1);
+		snprintf(output, siz + 1, "n%f", num);
+		v.iov_base = output;
+		v.iov_len = siz + 1;
+		break;
+	case LUA_TBOOLEAN:
+		c = lua_toboolean(L, 4) ? 1 : 0;
+		output = malloc(2);
+		memset(output, 0, 2);
+		snprintf(output, 2, "b%d", c);
+		v.iov_base = output;
+		v.iov_len = 2;
+		break;
+	default:
+		lua_pushboolean(L, 0);
+		lua_pushliteral(L, "bad value type");
+		return (1);
+	}
+
+	rc = mdbx_put(txn, dbi, &k, &v, 0);
+
+	if (output) {
+		free(output);
+	}
+
+	if (rc != MDBX_SUCCESS) {
+		lua_pushboolean(L, 0);
+		lua_pushfstring(L, "fail to set data: %s", mdbx_strerror(rc));
+		return (1);
+	}
+
+	lua_pushboolean(L, 1);
+
+	return (1);
+}
+
+static int
+lua_mdbx_dbi_get(lua_State *L) {
+	MDBX_dbi dbi = lua_mdbx_dbi_fetch(L, 1);
+	MDBX_txn *txn = lua_mdbx_txn_fetch(L, 2);
+	MDBX_val k, v;
+	int rc;
+	double num;
+	unsigned char c;
+
+	k.iov_base = (char *)luaL_checklstring(L, 3, &k.iov_len);
+	if (k.iov_len == 0) {
+		lua_pushboolean(L, 0);
+		lua_pushliteral(L, "empty key");
+		return (1);
+	}
+
+	rc = mdbx_get(txn, dbi, &k, &v);
+	if (rc != MDBX_SUCCESS) {
+		lua_pushboolean(L, 0);
+		lua_pushfstring(L, "error to get key(%s): %s", k.iov_base, mdbx_strerror(rc));
+		return (1);
+	}
+
+	switch (((char *)v.iov_base)[0]) {
+	case 's':
+		lua_pushlstring(L, ((char *)v.iov_base) + 1, v.iov_len - 1);
+		break;
+	case 'n':
+		num = atof((char *)v.iov_base + 1);
+		lua_pushnumber(L, num);
+		break;
+	case 'b':
+		c = ((unsigned char *)v.iov_base)[1];
+		lua_pushboolean(L, c == 49 ? 1 : 0);
+		break;
+	default:
+		lua_pushnil(L);
+	}
+
+	return (1);
+}
+
 static void
 lua_mdbx_dbi_mt(lua_State *L) {
 	luaL_newmetatable(L, MDBX_DBI_META);
@@ -422,7 +565,16 @@ lua_mdbx_dbi_mt(lua_State *L) {
 	lua_setfield(L, -2, "__index");
 
 	lua_pushcfunction(L, lua_mdbx_dbi_close);
-	lua_setfield(L, -2, "__gc");
+	lua_setfield(L, -2, "close");
+
+	lua_pushcfunction(L, lua_mdbx_dbi_delete);
+	lua_setfield(L, -2, "delete");
+
+	lua_pushcfunction(L, lua_mdbx_dbi_put);
+	lua_setfield(L, -2, "put");
+
+	lua_pushcfunction(L, lua_mdbx_dbi_get);
+	lua_setfield(L, -2, "get");
 }
 
 int
